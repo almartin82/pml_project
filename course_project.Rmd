@@ -1,0 +1,215 @@
+---
+title: "course_project"
+output: html_document
+---
+
+
+```{r data, echo=F, results='hide', message=F, error=F, warning=F, cache=F}
+
+library(knitr)
+library(magrittr)
+library(plyr)
+library(dplyr)
+library(caret)
+
+knitr::opts_chunk$set(
+  fig.dev = 'svg',
+  fig.width = 7,
+  fig.height = 6,
+  echo = TRUE,
+  message = FALSE,
+  error = FALSE,
+  warning = FALSE,
+  cache = TRUE
+)
+
+```
+
+Read in the data:
+
+```{r}
+
+pml_train <- read.csv(
+  'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv',
+  stringsAsFactors = FALSE
+)
+
+pml_validation <- read.csv(
+  'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv',
+  stringsAsFactors = FALSE
+)
+
+```
+
+**Data cleaning:**
+
+Eliminate `#DIV/0!` errors and code empty strings as NA
+```{r}
+
+for (i in 1:ncol(pml_train)) {
+  pml_train[, i] <- ifelse(pml_train[, i] == '#DIV/0!', NA, pml_train[, i])
+  pml_train[, i] <- ifelse(pml_train[, i] == '', NA, pml_train[, i])  
+}
+
+pml_train$classe <- as.factor(pml_train$classe)
+
+
+```
+
+## Goal, and Exploratory Analysis
+
+The data comes from a Brazilian lab focusing on Human Activity Recognition.  Here's how they describe the data:
+
+> Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+The goal is to use the training data to fit a model that correctly classifies the weight lifting exercise into classes `A, B, C, D, E`, based on a variety of sensor measures.
+
+We have fairly reasonable coverage of the five classes 
+```{r}
+table(pml_train$classe)
+```
+
+so we don't need to worry too much about skewed classes - we're close enough to equal representation of each class that the classifier isn't going to, say, minimize error by always predicting class A.
+
+The first challenge is just the sheer number of variables present in the data set.  I looked around for a data documentation, but couldn't find much on the HAR website that described the data set.  In particular, I wanted to know more about how independent trials were coded in the data set.  There is a `num_window` field that seems to increment up numerically, and then reset.  But because our test dataset seems to have random slices with no sequential patterns of `num_window`, I am going to proceed as if each of these rows represented an independent dumbell lift, even though that over-simplifies the complexity of the data captured here.
+
+To gain some basic intuition on the data, I first looked at the raw correlation of each variable to `classe`.
+
+```{r}
+
+cors <- sapply(
+  X = pml_train, 
+  function(x) {
+    tryCatch(
+      cor(as.numeric(x), as.numeric(pml_train$classe), use = "complete.obs"),
+      error = function(e) return(NA)
+    )
+  }
+) 
+
+sort(cors, decreasing = TRUE)[1:10]
+sort(cors)[1:10]
+
+```
+
+The correlation with `X` (the index of the dataframe) is almost certainly spurious - it simply indicates that the training spreadsheet was sorted by `classe` before distribution.  We'll throw that out. We'll also throw out timestamp, as that cannot be important to our final model.
+Other important observations seem to focus on the variance in the belt, and the y and yaw variables for the magnet belt and the arm.
+
+```{r}
+pml_train <- pml_train[, !names(pml_train) %in% c('X', 'cvtd_timestamp')]
+```
+
+## How I built the model & choices made
+
+I investigated to see which columns had significant missing data:
+```{r}
+
+pml_missing <- sapply(
+  X = pml_train, 
+  function(x) sum(is.na(x))
+) 
+
+sort(pml_missing, decreasing = TRUE)[1:10]
+
+mask <- (pml_missing / nrow(pml_train) < .5) %>% unname()
+to_keep <- names(pml_train)[mask]
+pml_subset <- pml_train[, to_keep]
+```
+
+because many of the methods below (eg, random forest) cannot handle variables that consist entirely of missing data, I am drop variables that has significant missingness from our training set.
+
+I chose to do some additional pre-processing and excluded variables that had a correlation with classe +/- .1 from zero, to reduce the number of dimensions the caret models needed to consider.  If time allowed, I also would have investigated primary component analysis approaches that helped to surface the most important features fo the dataset.
+
+```{r}
+
+to_keep <- cors[(abs(cors) > .1) | is.na(cors)] %>% names()
+mask <- names(pml_subset) %in% to_keep
+pml_subset <- pml_subset[, mask]
+```
+
+The course project presents two files - one 'training' set, and one 'test' set.  Because we don't have the `classe` values for the 'test' set, that file can more properly be thought of as validation.  We'll split our training data into a train and test set.
+```{r}
+trainIndex <- createDataPartition(
+  y = pml_subset$classe, 
+  p = .7,
+  list = FALSE,
+  times = 1
+)
+
+pml_testset  <- pml_subset[-trainIndex, ]
+pml_train <- pml_subset[trainIndex, ]
+```
+
+I experimented with a few different model specifications, but after examining fit statistics / accuracy, I found that random forests and boosted trees were both strong, achieving accuracy above 85% on my holdout data.
+
+```{r}
+model_control <- trainControl(
+  method = 'cv', number = 3, summaryFunction = defaultSummary
+)
+```
+
+**Random Forest**
+
+```{r}
+library(randomForest)
+
+rf_model <- train(
+  classe ~ .,
+  data = pml_train,
+  method = "rf",
+  allowParallel = TRUE,
+  trControl = model_control
+)
+```
+
+```{r}
+summary(rf_model)
+plot(rf_model)
+varImp(rf_model)
+```
+
+**Boosted Predictor**
+
+```{r, message = FALSE, results='hide'}
+bp_model <- train(
+  classe ~ .,
+  data = pml_train,
+  method = "gbm",
+  trControl = model_control
+)
+```
+
+```{r}
+summary(bp_model)
+```
+
+## Cross-validation strategy
+
+When fitting the random forest and boosted tree models, I'm using a 3-fold cross-validation with my training data.  Additionally, I'm holding out 30% of the training data as a test set, and using that to validate the model.
+
+## Accuracy and error
+
+First, we make a prediction on the test set for each model
+```{r}
+rf_test <- predict(rf_model, newdata = pml_testset)
+bp_test <- predict(bp_model, newdata = pml_testset)
+```
+
+Then, we calculate a confusion matrix for each model, which also reports accuracy and recall measures.
+
+```{r}
+confusionMatrix(rf_test, pml_testset$classe)
+confusionMatrix(bp_test, pml_testset$classe)
+```
+
+Random forest is the the strongest classifier, achieving accuracy of about 95% on both the test and training data.  Boosted trees (closely related to random forests) wre a close second.  I tried a handful of different types of Linear Discriminant models, but none broke 50% accuracy.
+It's possible that I may be able to stack or combine some of these models to squeeze out an additional few percentage points of accuracy, but as stands, 95% on test data is a strong result.  Because I used cross-validation in fitting the model, was attentive to features of the dataset that may have given my training model an unfair advantage, and used a hold-out strategy to verify my model, I fully expect that the random forest classifier would score close to 95% on a validation set.
+
+## Score validation set
+
+```{r}
+
+final <- predict(rf_model, newdata = pml_validation)
+final
+
+```
