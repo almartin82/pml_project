@@ -1,0 +1,11 @@
+base
+knitr
+magrittr
+plyr
+dplyr
+lattice
+ggplot2
+caret
+randomForest
+survival
+gbm

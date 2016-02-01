@@ -1,8 +1,8 @@
 ---
-title: "course_project"
+title: "Activity Recognition Project | Practical Machine Learning"
 output: html_document
+author: Andrew Martin
 ---
-
 
 ```{r data, echo=F, results='hide', message=F, error=F, warning=F, cache=F}
 
@@ -151,8 +151,6 @@ model_control <- trainControl(
 **Random Forest**
 
 ```{r}
-library(randomForest)
-
 rf_model <- train(
   classe ~ .,
   data = pml_train,
@@ -181,6 +179,8 @@ bp_model <- train(
 
 ```{r}
 summary(bp_model)
+plot(bp_model)
+varImp(bp_model)
 ```
 
 ## Cross-validation strategy
@@ -207,9 +207,14 @@ It's possible that I may be able to stack or combine some of these models to squ
 
 ## Score validation set
 
+This is the code that I used to spit out the 20 predicted classifications for the final quiz.
 ```{r}
 
 final <- predict(rf_model, newdata = pml_validation)
-final
+
+data.frame(
+  number = c(1:20),
+  prediction = final
+)
 
 ```
